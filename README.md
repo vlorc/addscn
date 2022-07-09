@@ -1,11 +1,11 @@
 # addscn
-Adds an empty section of a specified VirtualSize and Characteristics to a PE file. The section's content will be placed right at the end of the file and
-will be initially set to zero. The section will be loaded in memory at the next possible RVA after the former last section.
+Add a section, and inject the code of a specified Section File and Characteristics to a PE file. The section's content will be placed right at the end of the file and modify entry point. The section will be loaded in memory at the next possible RVA after the former last section.
 After the operation, the program will output the file offset of the section in the file and RVA where it will be placed in memory.
 You can then procceed to copy whatever raw data you want to this file offset up to a length of VirtualSize.
 
 The section header will be appended at the end of the section header table. If there is no room for it, the program will terminate and no
 modifications will be made to the target file. In a future version it may make room for it.
+
 ## 32 bit and 64 bit files
 
 This programs works on both 32 bit pe files (executables, dlls...) and 64 bit pe files, however, you need to compile the code for
@@ -14,7 +14,7 @@ and not on 32 bit files. The same happens for 32 bit files.
 
 ## Usage
 ```
-USAGE: addscn.exe <path to PE file> <section name> <VirtualSize> <Characteristics>
+USAGE: addscn.exe <path to PE file> <section name> <VirtualSize/Section File> <Characteristics> <Param String/Param File>
 
 VirtualSize can be in decimal (ex: 5021) or in hex (ex. 0x12c)
 Characteristics can either be a hex DWORD like this: 0xC0000040
@@ -27,7 +27,7 @@ rdata: 0x40000040: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
 
 Example:
 ```
-C:\>addscn.exe target_file.exe .TEST 0x231 rdata
+C:\>addscn.exe putty.exe .code putty.code text
 File size in bytes: 449024
 You can proceed to copy your raw section data to file offset 0x6da00 up to a length of 0x231
 The section will be mapped at RVA 0x73000
@@ -35,6 +35,25 @@ New file size in bytes: 6de00
 Operation completed successfully.
 
 ```
+
+ShellCode:
+```c
+// parameter mode
+void run(const char* lpData, size_t szLen) {
+	
+}
+```
+
+Hook GetCommandLineA / GetCommandLineW：
+1. .\shellcode\hook.x64
+2. .\shellcode\hook.x86
+
+```shell
+C:\>addscn.exe putty.exe .code .\shellcode\hook.x64 text -h
+```
+
+
+
 
 ## Issue with certificate table
 

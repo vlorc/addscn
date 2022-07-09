@@ -86,7 +86,7 @@ VOID UnmapAndExit(UINT uExitCode) {
 	ExitProcess(uExitCode);
 }
 
-VOID AppendNewSectionHeader(PSTR name, DWORD VirtualSize, DWORD Characteristics) {
+PIMAGE_SECTION_HEADER AppendNewSectionHeader(PSTR name, DWORD VirtualSize, DWORD Characteristics) {
 
 
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)pView;
@@ -124,12 +124,40 @@ VOID AppendNewSectionHeader(PSTR name, DWORD VirtualSize, DWORD Characteristics)
 			<< L" up to a length of 0x" << hex << VirtualSize << endl
 			<< L"The section will be mapped at RVA 0x" << hex << newSectionHeader->VirtualAddress << endl;
 
+	return newSectionHeader;
 }
+
+BOOL FileExists(LPCWSTR szPath)
+{
+	DWORD dwAttrib = GetFileAttributesW(szPath);
+
+	return (dwAttrib != INVALID_FILE_ATTRIBUTES && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+LPVOID MappingFile(LPCWSTR szPath, LPCWSTR name, LPDWORD lpSize)
+{
+	HANDLE hFile = CreateFile(szPath, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		wcout << L"Cannot open " << name  << " file (0x" << hex << GetLastError() << L")" << endl;
+		return NULL;
+	}
+	DWORD dwParamSizeHigh;
+	if (NULL != lpSize) {
+		*lpSize = GetFileSize(hFile, &dwParamSizeHigh);
+	}
+	HANDLE hMapping = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+	if (hMapping == INVALID_HANDLE_VALUE) {
+		wcout << L"Mapping " << name << " file failed (0x" << hex << GetLastError() << L")" << endl;
+		return NULL;
+	}
+	return MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+}
+
 
 int wmain(int argc, wchar_t *argv[])
 {
 	if (argc < 5) {
-		wcout << L"USAGE: " << argv[0] << L" <path to PE file> <section name> <VirtualSize> <Characteristics>" << endl << endl
+		wcout << L"USAGE: " << argv[0] << L" <path to PE file> <section name> <VirtualSize/Section File> <Characteristics> <Param String/Param File>" << endl << endl
 
 			<< L"VirtualSize can be in decimal (ex: 5021) or in hex (ex. 0x12c)" << endl
 			<< L"Characteristics can either be a hex DWORD like this: 0xC0000040 " << endl
@@ -160,13 +188,21 @@ int wmain(int argc, wchar_t *argv[])
 
 	WideCharToMultiByte(CP_UTF8, 0, wc_section_name, -1, str_section_name, 9, NULL, NULL);
 
+	DWORD StubSize = 0;
+	DWORD ParamOriginSize = 0;
+	DWORD ParamSize = 0;
 	DWORD VirtualSize = 0;
 	DWORD Characteristics = 0;
 	PWSTR str_VirtualSize = argv[3];
 	PWSTR str_Characteristics = argv[4];
+	LPCBYTE sectionData = NULL;
+	LPSTR paramData = NULL;
 
 	if (str_VirtualSize[0] == L'0' && str_VirtualSize[1] == L'x') {
 		VirtualSize = wcstoul(str_VirtualSize + 2, 0, 16);
+	} else if (wcspbrk(str_VirtualSize, L"./\\") != NULL) {
+		sectionData = (LPCBYTE)MappingFile(str_VirtualSize, L"section", &VirtualSize);
+		if (NULL == sectionData) return EXIT_SUCCESS;
 	}
 	else {
 		VirtualSize = wcstoul(str_VirtualSize, 0, 10);
@@ -257,7 +293,76 @@ int wmain(int argc, wchar_t *argv[])
 	// be able to add the section header and expand the size of the file.
 	Unmap();
 
-	DWORD newSize = P2ALIGNUP(dwFileSizeLow + VirtualSize, fileAlignment);
+	if (NULL != sectionData && 6 == argc) {
+		if (FileExists(argv[5])) {
+			paramData = (LPSTR)MappingFile(argv[5], L"param", &ParamOriginSize);
+			if (NULL == paramData) return EXIT_SUCCESS;
+		}
+		else {
+			ParamOriginSize = WideCharToMultiByte(CP_ACP, 0, argv[5], -1, NULL, 0, NULL, NULL);
+			ParamSize = (ParamOriginSize + 15) & -16;
+			paramData = (LPSTR)_alloca(ParamSize);
+			WideCharToMultiByte(CP_ACP, 0, argv[5], -1, paramData, ParamOriginSize, NULL, NULL);
+		}
+	}
+#ifdef _WIN64
+	BYTE stubData[48] = {
+		0xE8,0x00,0x00,0x00,0x00, // call 0
+		0x51,	// push rcx
+		0x52,	// push rdx
+		0x41,0x50,	// push r8
+		0x41,0x51,	// push r9
+		0x48,0x8B,0x4C,0x24,0x20,	// mov rcx, qword ptr:[rsp+0x20]
+		0x48,0x83,0xC1,0x2B,	// add rcx,0x2b
+		0x48,0xC7,0xC2,0x44,0x33,0x22,0x11, // mov rdx,11223344
+		0x48,0x81,0x6C,0x24,0x20,0x00,0x00,0x00,0x00, // sub qword ptr:[rsp+0x20], 0xB6AC5
+		0xE8,0x00,0x00,0x00,0x00, // call 0x
+		0x41,0x59,	// pop r9
+		0x41,0x58,	// pop r8
+		0x5A,	// pop rdx
+		0x59,	// pop rcx
+		0xC3,	// ret
+	};
+	DWORD stubOffset = 32;
+	if (NULL != sectionData) {
+		StubSize = sizeof(stubData);
+		if (NULL != paramData) {
+			*(LPDWORD)(stubData + 37) = 7 + ParamSize;
+			*(LPDWORD)(stubData + 23) = ParamOriginSize;
+		}
+		else {
+			memset(stubData + 11, 0x90, 16);
+		}
+	}
+#else
+	BYTE stubData[48] = {
+		0xE8,0x00,0x00,0x00,0x00, // call 0
+		0x60, // pushad 
+		0x8B,0x44,0x24,0x20, // mov eax,dword ptr ss : [esp + 0x20] 
+		0x83,0xC0,0x2B, // add eax,2B 
+		0x50, // push eax 
+		0x68,0x44,0x33,0x22,0x11, // push 0x11223344
+		0x81,0x6C,0x24,0x20,0x44,0x33,0x22,0x11, // sub dword ptr ss : [esp + 0x14] ,11223344 
+		0xE8,0x00,0x00,0x00,0x00, // call 
+		0x61, // popad 
+		0xC3, // ret 
+	};
+	DWORD stubOffset = 23;
+	if (NULL != sectionData) {
+		StubSize = sizeof(stubData);
+		if (NULL != paramData) {
+			*(LPDWORD)(stubData + 28) = 16 + ParamSize;
+			*(LPDWORD)(stubData + 15) = ParamOriginSize;
+		}
+		else {
+			memset(stubData + 6, 0x90, 13);
+		}
+	}
+#endif
+
+	dwFileSizeLow = P2ALIGNUP(dwFileSizeLow, fileAlignment);
+
+	DWORD newSize = P2ALIGNUP(dwFileSizeLow + VirtualSize + StubSize + ParamSize, fileAlignment);
 	MapFileRWNewSize(newSize);
 
 	if (pView == NULL) {
@@ -266,7 +371,23 @@ int wmain(int argc, wchar_t *argv[])
 	}
 
 	// Appending section header.
-	AppendNewSectionHeader(str_section_name, VirtualSize, Characteristics);
+	PIMAGE_SECTION_HEADER section = AppendNewSectionHeader(str_section_name, VirtualSize + StubSize + ParamSize, Characteristics);
+
+	if (NULL != sectionData) {
+		*(LPDWORD)(stubData + stubOffset) = newSectionHeader->VirtualAddress + 5 - ntHeaders->OptionalHeader.AddressOfEntryPoint;
+		ntHeaders->OptionalHeader.AddressOfEntryPoint = newSectionHeader->VirtualAddress;
+		LPBYTE lpBase = (LPBYTE)((UINT_PTR)pView + newSectionHeader->PointerToRawData);
+		memcpy(lpBase, stubData, StubSize);
+		lpBase += StubSize;
+		if (NULL != paramData) {
+			memcpy(lpBase, paramData, ParamOriginSize);
+			if (ParamSize != ParamOriginSize) {
+				memset(lpBase + ParamOriginSize, 0, ParamSize - ParamOriginSize);
+			}
+			lpBase += ParamSize;
+		}
+		memcpy(lpBase, sectionData, VirtualSize);
+	}
 	
 	
 
